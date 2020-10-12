@@ -21,7 +21,7 @@ import matplotlib
 #if you are running on the gradx/ugradx/ another cluster, 
 #you will need the following line
 #if you run on a local machine, you can comment it out
-matplotlib.use('agg') 
+#matplotlib.use('agg') 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import torch
@@ -148,8 +148,10 @@ class EncoderRNN(nn.Module):
         You should make your LSTM modular and re-use it in the Decoder.
         """
         "*** YOUR CODE HERE ***"
-        raise NotImplementedError
-        return output, hidden
+        #raise NotImplementedError
+        self.embedding = nn.Embedding(input_size, hidden_size)
+        #change this later - we gotta do it by hand RIP
+        self.gru = nn.GRU(hidden_size, hidden_size)
 
 
     def forward(self, input, hidden):
@@ -157,7 +159,11 @@ class EncoderRNN(nn.Module):
         returns the output and the hidden state
         """
         "*** YOUR CODE HERE ***"
-        raise NotImplementedError
+        #raise NotImplementedError
+        embedded = self.embedding(input).view(1,1,-1)
+        output = embedded
+        #change this too RIP
+        output, hidden = self.gru(output, hidden)
         return output, hidden
 
     def get_initial_hidden_state(self):
@@ -179,8 +185,12 @@ class AttnDecoderRNN(nn.Module):
         """Initilize your word embedding, decoder LSTM, and weights needed for your attention here
         """
         "*** YOUR CODE HERE ***"
-        raise NotImplementedError
-
+        #raise NotImplementedError
+        self.embedding = nn.Embedding(self.output_size, self.hidden_size)
+        self.attn = nn.Linear(self.hidden_size * 2, self.max_length)
+        self.attn_combine = nn.Linear(self.hidden_size * 2, self.hidden_size)
+        #change this
+        self.gru = nn.GRU(self.hidden_size, self.hidden_size)
         self.out = nn.Linear(self.hidden_size, self.output_size)
 
     def forward(self, input, hidden, encoder_outputs):
@@ -191,7 +201,19 @@ class AttnDecoderRNN(nn.Module):
         """
         
         "*** YOUR CODE HERE ***"
-        raise NotImplementedError
+        #raise NotImplementedError
+        embedded = self.embedding(input).view(1,1,-1)
+        embedded = self.dropout(embedded)
+        attn_weights = F.softmax(
+            self.attn(torch.cat((embedded[0], hidden[0]), 1)), dim=1)
+        attn_applied = torch.bmm(attn_weights.unsqueeze(0),
+            encoder_outputs.unsqueeze(0))
+
+        output = torch.cat((embedded[0], attn_applied[0]), 1)
+        output = self.attn_combine(output).unsqueeze(0)
+        output = F.relu(output)
+        output, hidden = self.gru(output, hidden)
+        log_softmax = F.log_softmax(self.out(output[0]), dim=1)
         return log_softmax, hidden, attn_weights
 
     def get_initial_hidden_state(self):
