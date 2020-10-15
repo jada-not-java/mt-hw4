@@ -134,6 +134,52 @@ def tensors_from_pair(src_vocab, tgt_vocab, pair):
 
 ######################################################################
 
+class CustomLSTM(nn.Module):
+    """class for manually implemented LSTM"""
+    def __init__(self, input_size, hidden_size):
+        super().__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.W = nn.Parameter(torch.Tensor(input_size, hidden_size * 4))
+        self.U = nn.Parameter(torch.Tensor(hidden_size, hidden_size * 4))
+        self.bias = nn.Parameter(torch.Tensor(hidden_size * 4))
+        self.init_weights()
+        #self.lstm = nn.GRU()
+
+    def init_weights(self):
+        for p in self.parameters():
+            if p.data.ndimensions() > 2:
+                nn.init.xavier_uniform_(p.data)
+            else:
+                nn.init.zeros_(p.data)
+
+    def forward(self, input, hidden):
+        batch_seq, seq_size = input.size()
+        h_t, c_t = hidden
+        hidden_s = []
+
+        for t in range(seq_size):
+            x_t = input[:,t,:]
+            gates = x_t @ self.W + h_t @ self.U + self.bias
+            #input
+            i_t = torch.sigmoid(gates[:,:self.hidden_size])
+            #forget
+            f_t = torch.sigmoid(gates[:,self.hidden_size:self.hidden_size*2])
+            #g
+            g_t = torch.tanh(gates[:,self.hidden*2:self.hidden_size*3])
+            #output
+            o_t = torch.sigmoid(gates[:,self.hidden_size*3])
+
+            c_t = f_t * c_t + i_t * g_t
+            h_t = o_t * torch.tanh(c_t)
+            hidden_s.append(h_t.unsqueeze(0))
+        
+        hidden_s = torch.cat(hidden_s, dim=0)
+        return h_t, c_t
+
+
+
+
 
 class EncoderRNN(nn.Module):
     """the class for the enoder RNN
@@ -151,7 +197,7 @@ class EncoderRNN(nn.Module):
         #raise NotImplementedError
         self.embedding = nn.Embedding(input_size, hidden_size)
         #change this later - we gotta do it by hand RIP
-        self.gru = nn.GRU(hidden_size, hidden_size)
+        self.rnn = CustomLSTM(hidden_size, hidden_size)
 
 
     def forward(self, input, hidden):
@@ -160,10 +206,10 @@ class EncoderRNN(nn.Module):
         """
         "*** YOUR CODE HERE ***"
         #raise NotImplementedError
-        embedded = self.embedding(input).view(1,1,-1)
+        embedded = self.embedding(input).view(len(input),1,-1)
         output = embedded
         #change this too RIP
-        output, hidden = self.gru(output, hidden)
+        output, hidden = self.rnn(output, hidden)
         return output, hidden
 
     def get_initial_hidden_state(self):
@@ -187,11 +233,10 @@ class AttnDecoderRNN(nn.Module):
         "*** YOUR CODE HERE ***"
         #raise NotImplementedError
         self.embedding = nn.Embedding(self.output_size, self.hidden_size)
-        self.attn = nn.Linear(self.hidden_size * 2, self.max_length)
-        self.attn_combine = nn.Linear(self.hidden_size * 2, self.hidden_size)
+        self.attn = nn.Linear(self.hidden_size, self.hidden_size)
         #change this
-        self.gru = nn.GRU(self.hidden_size, self.hidden_size)
-        self.out = nn.Linear(self.hidden_size, self.output_size)
+        self.rnn = CustomLSTM(self.hidden_size * 2, self.hidden_size)
+        self.out = nn.Linear(self.hidden_size * 2, self.output_size)
 
     def forward(self, input, hidden, encoder_outputs):
         """runs the forward pass of the decoder
@@ -203,17 +248,16 @@ class AttnDecoderRNN(nn.Module):
         "*** YOUR CODE HERE ***"
         #raise NotImplementedError
         embedded = self.embedding(input).view(1,1,-1)
+        #apply dropout
         embedded = self.dropout(embedded)
-        attn_weights = F.softmax(
-            self.attn(torch.cat((embedded[0], hidden[0]), 1)), dim=1)
-        attn_applied = torch.bmm(attn_weights.unsqueeze(0),
-            encoder_outputs.unsqueeze(0))
+        attn_weights = self.attn(hidden[-1], encoder_outputs)
+        context = attn_weights.bmm(encoder_outputs.transpose(0,1))
 
-        output = torch.cat((embedded[0], attn_applied[0]), 1)
-        output = self.attn_combine(output).unsqueeze(0)
-        output = F.relu(output)
-        output, hidden = self.gru(output, hidden)
-        log_softmax = F.log_softmax(self.out(output[0]), dim=1)
+        r_input = torch.cat((embedded, context), 2)
+        output, hidden = self.rnn(output, hidden)
+
+        output = output.squeeze(0)
+        log_softmax = F.log_softmax(self.out(torch.cat((output, context), 1)))
         return log_softmax, hidden, attn_weights
 
     def get_initial_hidden_state(self):
