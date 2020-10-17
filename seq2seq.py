@@ -29,6 +29,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from nltk.translate.bleu_score import corpus_bleu
 from torch import optim
+from torch.autograd import Variable
 
 
 logging.basicConfig(level=logging.DEBUG,
@@ -37,7 +38,7 @@ logging.basicConfig(level=logging.DEBUG,
 # we are forcing the use of cpu, if you have access to a gpu, you can set the flag to "cuda"
 # make sure you are very careful if you are using a gpu on a shared cluster/grid, 
 # it can be very easy to confict with other people's jobs.
-# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = torch.device("cpu")
 
 SOS_token = "<SOS>"
@@ -197,7 +198,8 @@ class EncoderRNN(nn.Module):
         #raise NotImplementedError
         self.embedding = nn.Embedding(input_size, hidden_size)
         #change this later - we gotta do it by hand RIP
-        self.rnn = CustomLSTM(hidden_size, hidden_size)
+        #self.rnn = CustomLSTM(hidden_size, hidden_size)
+        self.rnn = nn.GRU(hidden_size, hidden_size)
 
 
     def forward(self, input, hidden):
@@ -207,13 +209,33 @@ class EncoderRNN(nn.Module):
         "*** YOUR CODE HERE ***"
         #raise NotImplementedError
         embedded = self.embedding(input).view(len(input),1,-1)
-        output = embedded
+        #output = embedded
         #change this too RIP
-        output, hidden = self.rnn(output, hidden)
+        output, hidden = self.rnn(embedded, hidden)
         return output, hidden
 
     def get_initial_hidden_state(self):
         return torch.zeros(1, 1, self.hidden_size, device=device)
+
+class Attn(nn.Module):
+    '''attention layer'''
+    def __init__(self, hidden_size, max_length=MAX_LENGTH):
+        super(Attn, self).__init__()
+        self.hidden_size = hidden_size
+        self.attn = nn.Linear(self.hidden_size, self.hidden_size)
+    
+    def forward(self, hidden, outputs):
+        energies = torch.zeros(len(outputs))
+
+        for i in range(len(outputs)):
+            energies[i] = self.score(hidden, outputs[i])
+
+        return F.softmax(energies).unsqueeze(0).unsqueeze(0)
+
+    def score(self, hidden, output):
+        energy = self.attn(output)
+        energy = hidden.squeeze() @ energy.squeeze()
+        return energy
 
 
 class AttnDecoderRNN(nn.Module):
@@ -233,9 +255,10 @@ class AttnDecoderRNN(nn.Module):
         "*** YOUR CODE HERE ***"
         #raise NotImplementedError
         self.embedding = nn.Embedding(self.output_size, self.hidden_size)
-        self.attn = nn.Linear(self.hidden_size, self.hidden_size)
+        self.attn = Attn(self.hidden_size)
         #change this
-        self.rnn = CustomLSTM(self.hidden_size * 2, self.hidden_size)
+        #self.rnn = CustomLSTM(self.hidden_size * 2, self.hidden_size)
+        self.rnn = nn.GRU(self.hidden_size * 2, self.hidden_size)
         self.out = nn.Linear(self.hidden_size * 2, self.output_size)
 
     def forward(self, input, hidden, encoder_outputs):
@@ -252,12 +275,13 @@ class AttnDecoderRNN(nn.Module):
         embedded = self.dropout(embedded)
         attn_weights = self.attn(hidden[-1], encoder_outputs)
         context = attn_weights.bmm(encoder_outputs.transpose(0,1))
-
+        
         r_input = torch.cat((embedded, context), 2)
-        output, hidden = self.rnn(output, hidden)
+        output, hidden = self.rnn(r_input, hidden)
 
         output = output.squeeze(0)
-        log_softmax = F.log_softmax(self.out(torch.cat((output, context), 1)))
+        print(output.size(), context.size())
+        log_softmax = F.log_softmax(self.out(torch.cat((output, context.squeeze(0)), 1)))
         return log_softmax, hidden, attn_weights
 
     def get_initial_hidden_state(self):
@@ -512,4 +536,32 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    #main()
+    
+    encoder_test = EncoderRNN(10, 10)
+    decoder_test = AttnDecoderRNN(10, 10)
+    print(encoder_test)
+    print(decoder_test)
+
+    encoder_hidden = encoder_test.get_initial_hidden_state()
+    word_input = torch.LongTensor([1, 2, 3])
+    #if USE_CUDA:
+    #    encoder_test.cuda()
+    #   word_input = word_input.cuda()
+    encoder_outputs, encoder_hidden = encoder_test(word_input, encoder_hidden)
+
+    word_inputs = torch.LongTensor([1, 2, 3])
+    decoder_attns = torch.zeros(1, 3, 3)
+    decoder_hidden = encoder_hidden
+    #decoder_context = torch.zeros(1, decoder_test.hidden_size)
+
+    #if USE_CUDA:
+    #    decoder_test.cuda()
+    #    word_inputs = word_inputs.cuda()
+    #    decoder_context = decoder_context.cuda()
+
+    for i in range(3):
+        decoder_output, decoder_hidden, decoder_attn = decoder_test(word_inputs[i], decoder_hidden, encoder_outputs)
+        print(decoder_output.size(), decoder_hidden.size(), decoder_attn.size())
+        decoder_attns[0, i] = decoder_attn.squeeze(0).cpu().data
+    
