@@ -554,33 +554,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-    #this was just used to test if the encoder/decoder thing was working
-    '''
-    encoder_test = EncoderRNN(10, 10)
-    decoder_test = AttnDecoderRNN(10, 10)
-    print(encoder_test)
-    print(decoder_test)
-
-    encoder_hidden = encoder_test.get_initial_hidden_state()
-    word_input = torch.LongTensor([1, 2, 3])
-    #if USE_CUDA:
-    #    encoder_test.cuda()
-    #   word_input = word_input.cuda()
-    encoder_outputs, encoder_hidden = encoder_test(word_input, encoder_hidden)
-
-    word_inputs = torch.LongTensor([1, 2, 3])
-    decoder_attns = torch.zeros(1, 3, 3)
-    decoder_hidden = encoder_hidden
-    #decoder_context = torch.zeros(1, decoder_test.hidden_size)
-
-    #if USE_CUDA:
-    #    decoder_test.cuda()
-    #    word_inputs = word_inputs.cuda()
-    #    decoder_context = decoder_context.cuda()
-
-    for i in range(3):
-        decoder_output, decoder_hidden, decoder_attn = decoder_test(word_inputs[i], decoder_hidden, encoder_outputs)
-        print(decoder_output.size(), decoder_hidden.size(), decoder_attn.size())
-        decoder_attns[0, i] = decoder_attn.squeeze(0).cpu().data
-    '''
     
