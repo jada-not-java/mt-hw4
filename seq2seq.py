@@ -553,8 +553,9 @@ def main():
 
 
 if __name__ == '__main__':
-    #main()
-    
+    main()
+    #this was just used to test if the encoder/decoder thing was working
+    '''
     encoder_test = EncoderRNN(10, 10)
     decoder_test = AttnDecoderRNN(10, 10)
     print(encoder_test)
@@ -581,4 +582,5 @@ if __name__ == '__main__':
         decoder_output, decoder_hidden, decoder_attn = decoder_test(word_inputs[i], decoder_hidden, encoder_outputs)
         print(decoder_output.size(), decoder_hidden.size(), decoder_attn.size())
         decoder_attns[0, i] = decoder_attn.squeeze(0).cpu().data
+    '''
     
