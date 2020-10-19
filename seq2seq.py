@@ -296,9 +296,44 @@ def train(input_tensor, target_tensor, encoder, decoder, optimizer, criterion, m
     # make sure the encoder and decoder are in training mode so dropout is applied
     encoder.train()
     decoder.train()
+    
 
     "*** YOUR CODE HERE ***"
-    raise NotImplementedError
+    criterion = nn.MSELoss()
+    input_length = input_tensor.size(0)
+    target_length = target_tensor.size(0)
+
+    # same structure as translate below
+    encoder_hidden = encoder.get_initial_hidden_state()
+    encoder_outputs = torch.zeros(max_length, encoder.hidden_size, device=device)
+
+    # loop through input, update loss and optimizer
+    for ei in range(input_length):
+        encoder_output, encoder_hidden = encoder(input_tensor[ei],
+                                                 encoder_hidden)
+        encoder_outputs[ei] += encoder_output[0, 0]
+        
+
+    # input a tensor starting with start-of-sentence token
+    decoder_input = torch.tensor([[SOS_index]], device=device)
+
+    decoder_hidden = encoder_hidden
+
+    decoded_words = []
+    decoder_attentions = torch.zeros(max_length, max_length)
+
+    # loop through decoder
+    for di in range(max_length):
+        optimizer.zero_grad()
+        decoder_output, decoder_hidden, decoder_attention = decoder(
+            decoder_input, decoder_hidden, encoder_outputs)
+        decoder_attentions[di] = decoder_attention.data
+        loss = criterion(decoder_output, target_tensor)
+        loss.backward()
+        optimizer.step()
+
+        decoder_input = topi.squeeze().detach()
+
 
     return loss.item() 
 
