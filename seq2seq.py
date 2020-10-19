@@ -230,7 +230,8 @@ class Attn(nn.Module):
         for i in range(len(outputs)):
             energies[i] = self.score(hidden, outputs[i])
 
-        return F.softmax(energies).unsqueeze(0).unsqueeze(0)
+        #seq2seq.py:233: UserWarning: Implicit dimension choice for softmax has been deprecated. Change the call to include dim=X as an argument.
+        return F.softmax(energies, dim=0).unsqueeze(0).unsqueeze(0)
 
     def score(self, hidden, output):
         energy = self.attn(output)
@@ -280,8 +281,9 @@ class AttnDecoderRNN(nn.Module):
         output, hidden = self.rnn(r_input, hidden)
 
         output = output.squeeze(0)
-        print(output.size(), context.size())
-        log_softmax = F.log_softmax(self.out(torch.cat((output, context.squeeze(0)), 1)))
+        #print(output.size(), context.size())
+        #seq2seq.py:284: UserWarning: Implicit dimension choice for log_softmax has been deprecated. Change the call to include dim=X as an argument.
+        log_softmax = F.log_softmax(self.out(torch.cat((output, context.squeeze(0)), 1)), dim=1)
         return log_softmax, hidden, attn_weights
 
     def get_initial_hidden_state(self):
@@ -299,7 +301,7 @@ def train(input_tensor, target_tensor, encoder, decoder, optimizer, criterion, m
     
 
     "*** YOUR CODE HERE ***"
-    criterion = nn.MSELoss()
+    criterion = nn.NLLLoss()
     input_length = input_tensor.size(0)
     target_length = target_tensor.size(0)
 
@@ -313,26 +315,26 @@ def train(input_tensor, target_tensor, encoder, decoder, optimizer, criterion, m
                                                  encoder_hidden)
         encoder_outputs[ei] += encoder_output[0, 0]
         
-
     # input a tensor starting with start-of-sentence token
     decoder_input = torch.tensor([[SOS_index]], device=device)
 
     decoder_hidden = encoder_hidden
-
+    loss = 0
     decoded_words = []
     decoder_attentions = torch.zeros(max_length, max_length)
-
     # loop through decoder
-    for di in range(max_length):
+    for di in range(target_length):
         optimizer.zero_grad()
         decoder_output, decoder_hidden, decoder_attention = decoder(
             decoder_input, decoder_hidden, encoder_outputs)
         decoder_attentions[di] = decoder_attention.data
-        loss = criterion(decoder_output, target_tensor)
-        loss.backward()
+        print(decoder_output[di].size(), target_tensor[di].size())
+        c = criterion(decoder_output, target_tensor[di])
+        #print(c)
+        loss += c
+        c.backward()
         optimizer.step()
 
-        decoder_input = topi.squeeze().detach()
 
 
     return loss.item() 
