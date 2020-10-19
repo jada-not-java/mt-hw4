@@ -274,7 +274,7 @@ class AttnDecoderRNN(nn.Module):
         #apply dropout
         embedded = self.dropout(embedded)
         attn_weights = self.attn(hidden[-1], encoder_outputs)
-        context = attn_weights.bmm(encoder_outputs.transpose(0,1))
+        context = attn_weights.bmm(encoder_outputs.unsqueeze(0))
         
         r_input = torch.cat((embedded, context), 2)
         output, hidden = self.rnn(r_input, hidden)
