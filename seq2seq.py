@@ -209,9 +209,9 @@ class EncoderRNN(nn.Module):
         "*** YOUR CODE HERE ***"
         #raise NotImplementedError
         embedded = self.embedding(input).view(len(input),1,-1)
-        #output = embedded
+        output = embedded
         #change this too RIP
-        output, hidden = self.rnn(embedded, hidden)
+        output, hidden = self.rnn(output, hidden)
         return output, hidden
 
     def get_initial_hidden_state(self):
@@ -256,11 +256,17 @@ class AttnDecoderRNN(nn.Module):
         "*** YOUR CODE HERE ***"
         #raise NotImplementedError
         self.embedding = nn.Embedding(self.output_size, self.hidden_size)
-        self.attn = Attn(self.hidden_size)
+        #self.attn = Attn(self.hidden_size)
         #change this
         #self.rnn = CustomLSTM(self.hidden_size * 2, self.hidden_size)
-        self.rnn = nn.GRU(self.hidden_size * 2, self.hidden_size)
-        self.out = nn.Linear(self.hidden_size * 2, self.output_size)
+        #self.rnn = nn.GRU(self.hidden_size * 2, self.hidden_size)
+        #self.out = nn.Linear(self.hidden_size * 2, self.output_size)
+        self.attn = nn.Linear(self.hidden_size * 2, self.max_length)
+        self.attn_combine = nn.Linear(self.hidden_size * 2, self.hidden_size)
+        self.dropout = nn.Dropout(self.dropout_p)
+        self.gru = nn.GRU(self.hidden_size, self.hidden_size)
+        self.out = nn.Linear(self.hidden_size, self.output_size)
+
 
     def forward(self, input, hidden, encoder_outputs):
         """runs the forward pass of the decoder
@@ -274,16 +280,28 @@ class AttnDecoderRNN(nn.Module):
         embedded = self.embedding(input).view(1,1,-1)
         #apply dropout
         embedded = self.dropout(embedded)
-        attn_weights = self.attn(hidden[-1], encoder_outputs)
-        context = attn_weights.bmm(encoder_outputs.unsqueeze(0))
+        #attn_weights = self.attn(hidden[-1], encoder_outputs)
+        #context = attn_weights.bmm(encoder_outputs.unsqueeze(0))
         
-        r_input = torch.cat((embedded, context), 2)
-        output, hidden = self.rnn(r_input, hidden)
+        #r_input = torch.cat((embedded, context), 2)
+        #output, hidden = self.rnn(r_input, hidden)
 
-        output = output.squeeze(0)
+        #output = output.squeeze(0)
         #print(output.size(), context.size())
         #seq2seq.py:284: UserWarning: Implicit dimension choice for log_softmax has been deprecated. Change the call to include dim=X as an argument.
-        log_softmax = F.log_softmax(self.out(torch.cat((output, context.squeeze(0)), 1)), dim=1)
+        #log_softmax = F.log_softmax(self.out(torch.cat((output, context.squeeze(0)), 1)), dim=1)
+        attn_weights = F.softmax(
+            self.attn(torch.cat((embedded[0], hidden[0]), 1)), dim=1)
+        attn_applied = torch.bmm(attn_weights.unsqueeze(0),
+                                 encoder_outputs.unsqueeze(0))
+
+        output = torch.cat((embedded[0], attn_applied[0]), 1)
+        output = self.attn_combine(output).unsqueeze(0)
+
+        output = F.relu(output)
+        output, hidden = self.gru(output, hidden)
+
+        log_softmax = F.log_softmax(self.out(output[0]), dim=1)
         return log_softmax, hidden, attn_weights
 
     def get_initial_hidden_state(self):
@@ -301,19 +319,21 @@ def train(input_tensor, target_tensor, encoder, decoder, optimizer, criterion, m
     
 
     "*** YOUR CODE HERE ***"
-    criterion = nn.NLLLoss()
     input_length = input_tensor.size(0)
     target_length = target_tensor.size(0)
+    optimizer.zero_grad()
 
     # same structure as translate below
     encoder_hidden = encoder.get_initial_hidden_state()
     encoder_outputs = torch.zeros(max_length, encoder.hidden_size, device=device)
 
+
     # loop through input, update loss and optimizer
-    for ei in range(input_length):
-        encoder_output, encoder_hidden = encoder(input_tensor[ei],
-                                                 encoder_hidden)
-        encoder_outputs[ei] += encoder_output[0, 0]
+    #for ei in range(input_length):
+    #    encoder_output, encoder_hidden = encoder(input_tensor[ei],
+    #                                             encoder_hidden)
+    #    encoder_outputs[ei] += encoder_output[0, 0]
+    encoder_outputs, encoder_hidden = encoder(input_tensor, encoder_hidden)
         
     # input a tensor starting with start-of-sentence token
     decoder_input = torch.tensor([[SOS_index]], device=device)
@@ -324,16 +344,17 @@ def train(input_tensor, target_tensor, encoder, decoder, optimizer, criterion, m
     decoder_attentions = torch.zeros(max_length, max_length)
     # loop through decoder
     for di in range(target_length):
-        optimizer.zero_grad()
+        #optimizer.zero_grad()
         decoder_output, decoder_hidden, decoder_attention = decoder(
             decoder_input, decoder_hidden, encoder_outputs)
-        decoder_attentions[di] = decoder_attention.data
-        print(decoder_output[di].size(), target_tensor[di].size())
+        #decoder_attentions[di] = decoder_attention.data
         c = criterion(decoder_output, target_tensor[di])
         #print(c)
         loss += c
-        c.backward()
-        optimizer.step()
+        decoder_input = target_tensor[di]
+    #backpropogation
+    loss.backward()
+    optimizer.step()
 
 
 
@@ -467,7 +488,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--hidden_size', default=256, type=int,
                     help='hidden size of encoder/decoder, also word vector size')
-    ap.add_argument('--n_iters', default=100000, type=int,
+    ap.add_argument('--n_iters', default=100, type=int,
                     help='total number of examples to train on')
     ap.add_argument('--print_every', default=5000, type=int,
                     help='print loss info every this many training examples')
