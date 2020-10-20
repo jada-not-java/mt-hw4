@@ -208,7 +208,7 @@ class EncoderRNN(nn.Module):
         """
         "*** YOUR CODE HERE ***"
         #raise NotImplementedError
-        embedded = self.embedding(input).view(len(input),1,-1)
+        embedded = self.embedding(input).view(1,1,-1)
         output = embedded
         #change this too RIP
         output, hidden = self.rnn(output, hidden)
@@ -329,11 +329,11 @@ def train(input_tensor, target_tensor, encoder, decoder, optimizer, criterion, m
 
 
     # loop through input, update loss and optimizer
-    #for ei in range(input_length):
-    #    encoder_output, encoder_hidden = encoder(input_tensor[ei],
-    #                                             encoder_hidden)
-    #    encoder_outputs[ei] += encoder_output[0, 0]
-    encoder_outputs, encoder_hidden = encoder(input_tensor, encoder_hidden)
+    for ei in range(input_length):
+        encoder_output, encoder_hidden = encoder(input_tensor[ei],
+                                                 encoder_hidden)
+        encoder_outputs[ei] += encoder_output[0, 0]
+    #encoder_outputs, encoder_hidden = encoder(input_tensor, encoder_hidden)
         
     # input a tensor starting with start-of-sentence token
     decoder_input = torch.tensor([[SOS_index]], device=device)
