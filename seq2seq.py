@@ -47,6 +47,7 @@ EOS_token = "<EOS>"
 SOS_index = 0
 EOS_index = 1
 MAX_LENGTH = 15
+teacher_force_ratio = 0.5
 
 
 class Vocab:
@@ -195,10 +196,8 @@ class EncoderRNN(nn.Module):
         You should make your LSTM modular and re-use it in the Decoder.
         """
         "*** YOUR CODE HERE ***"
-        #raise NotImplementedError
         self.embedding = nn.Embedding(input_size, hidden_size)
-        #change this later - we gotta do it by hand RIP
-        #self.rnn = CustomLSTM(hidden_size, hidden_size)
+        self.rnn1 = CustomLSTM(hidden_size, hidden_size)
         self.rnn = nn.GRU(hidden_size, hidden_size)
 
 
@@ -207,10 +206,7 @@ class EncoderRNN(nn.Module):
         returns the output and the hidden state
         """
         "*** YOUR CODE HERE ***"
-        #raise NotImplementedError
         embedded = self.embedding(input).view(1,1,-1)
-        output = embedded
-        #change this too RIP
         output, hidden = self.rnn(output, hidden)
         return output, hidden
 
@@ -222,22 +218,14 @@ class Attn(nn.Module):
     def __init__(self, hidden_size, max_length=MAX_LENGTH):
         super(Attn, self).__init__()
         self.hidden_size = hidden_size
-        self.attn = nn.Linear(self.hidden_size, self.hidden_size)
+        self.max_length = max_length
+        self.attn = nn.Linear(self.hidden_size * 2, self.max_length)
+        
     
-    def forward(self, hidden, outputs):
-        energies = torch.zeros(len(outputs))
-
-        for i in range(len(outputs)):
-            energies[i] = self.score(hidden, outputs[i])
-
-        #seq2seq.py:233: UserWarning: Implicit dimension choice for softmax has been deprecated. Change the call to include dim=X as an argument.
-        return F.softmax(energies, dim=0).unsqueeze(0).unsqueeze(0)
-
-    def score(self, hidden, output):
-        energy = self.attn(output)
-        energy = hidden.squeeze() @ energy.squeeze()
-        return energy
-
+    def forward(self, input, hidden):
+        outputs = self.attn(input, 1)
+        ouputs = F.softmax(outputs, dim=1)
+        return outputs
 
 class AttnDecoderRNN(nn.Module):
     """the class for the decoder 
@@ -256,15 +244,11 @@ class AttnDecoderRNN(nn.Module):
         "*** YOUR CODE HERE ***"
         #raise NotImplementedError
         self.embedding = nn.Embedding(self.output_size, self.hidden_size)
-        #self.attn = Attn(self.hidden_size)
-        #change this
-        #self.rnn = CustomLSTM(self.hidden_size * 2, self.hidden_size)
-        #self.rnn = nn.GRU(self.hidden_size * 2, self.hidden_size)
-        #self.out = nn.Linear(self.hidden_size * 2, self.output_size)
-        self.attn = nn.Linear(self.hidden_size * 2, self.max_length)
-        self.attn_combine = nn.Linear(self.hidden_size * 2, self.hidden_size)
         self.dropout = nn.Dropout(self.dropout_p)
-        self.gru = nn.GRU(self.hidden_size, self.hidden_size)
+        self.attn = nn.Linear(self.hidden_size*2, self.max_length)
+        self.context = nn.Linear(self.hidden_size * 2, self.hidden_size)
+        
+        self.rnn = nn.GRU(self.hidden_size, self.hidden_size)
         self.out = nn.Linear(self.hidden_size, self.output_size)
 
 
@@ -276,32 +260,17 @@ class AttnDecoderRNN(nn.Module):
         """
         
         "*** YOUR CODE HERE ***"
-        #raise NotImplementedError
         embedded = self.embedding(input).view(1,1,-1)
         #apply dropout
         embedded = self.dropout(embedded)
-        #attn_weights = self.attn(hidden[-1], encoder_outputs)
-        #context = attn_weights.bmm(encoder_outputs.unsqueeze(0))
         
-        #r_input = torch.cat((embedded, context), 2)
-        #output, hidden = self.rnn(r_input, hidden)
-
-        #output = output.squeeze(0)
-        #print(output.size(), context.size())
-        #seq2seq.py:284: UserWarning: Implicit dimension choice for log_softmax has been deprecated. Change the call to include dim=X as an argument.
-        #log_softmax = F.log_softmax(self.out(torch.cat((output, context.squeeze(0)), 1)), dim=1)
-        attn_weights = F.softmax(
-            self.attn(torch.cat((embedded[0], hidden[0]), 1)), dim=1)
-        attn_applied = torch.bmm(attn_weights.unsqueeze(0),
-                                 encoder_outputs.unsqueeze(0))
-
-        output = torch.cat((embedded[0], attn_applied[0]), 1)
-        output = self.attn_combine(output).unsqueeze(0)
-
-        output = F.relu(output)
-        output, hidden = self.gru(output, hidden)
-
-        log_softmax = F.log_softmax(self.out(output[0]), dim=1)
+        attn_weights = F.softmax(self.attn(torch.cat((embedded[0], hidden[0]), 1)), dim=1)
+        context = torch.bmm(attn_weights.unsqueeze(0), encoder_outputs.unsqueeze(0))
+        output = torch.cat((embedded[0], context[0]), 1)
+        output = F.relu(self.context(output).unsqueeze(0))
+        output, hidden = self.rnn(output, hidden)
+        output = self.out(output[0])
+        log_softmax = F.log_softmax(output, dim=1)
         return log_softmax, hidden, attn_weights
 
     def get_initial_hidden_state(self):
@@ -329,35 +298,31 @@ def train(input_tensor, target_tensor, encoder, decoder, optimizer, criterion, m
 
 
     # loop through input, update loss and optimizer
-    for ei in range(input_length):
-        encoder_output, encoder_hidden = encoder(input_tensor[ei],
+    for e_i in range(input_length):
+        encoder_output, encoder_hidden = encoder(input_tensor[e_i],
                                                  encoder_hidden)
-        encoder_outputs[ei] += encoder_output[0, 0]
-    #encoder_outputs, encoder_hidden = encoder(input_tensor, encoder_hidden)
+        encoder_outputs[e_i] += encoder_output[0, 0]
         
-    # input a tensor starting with start-of-sentence token
     decoder_input = torch.tensor([[SOS_index]], device=device)
 
     decoder_hidden = encoder_hidden
     loss = 0
-    decoded_words = []
     decoder_attentions = torch.zeros(max_length, max_length)
     # loop through decoder
-    for di in range(target_length):
+    for d_i in range(target_length):
         #optimizer.zero_grad()
         decoder_output, decoder_hidden, decoder_attention = decoder(
             decoder_input, decoder_hidden, encoder_outputs)
-        #decoder_attentions[di] = decoder_attention.data
-        c = criterion(decoder_output, target_tensor[di])
-        #print(c)
+        v, top_i = decoder_output.topk(1)
+        decoder_input = top_i.squeeze().detach()
+        c = criterion(decoder_output, target_tensor[d_i])
         loss += c
-        decoder_input = target_tensor[di]
+        if decoder_input.item() == EOS_token:
+            break
     #backpropogation
     loss.backward()
     optimizer.step()
-
-
-
+    
     return loss.item() 
 
 
@@ -488,7 +453,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--hidden_size', default=256, type=int,
                     help='hidden size of encoder/decoder, also word vector size')
-    ap.add_argument('--n_iters', default=100, type=int,
+    ap.add_argument('--n_iters', default=100000, type=int,
                     help='total number of examples to train on')
     ap.add_argument('--print_every', default=5000, type=int,
                     help='print loss info every this many training examples')
