@@ -146,7 +146,6 @@ class CustomLSTM(nn.Module):
         self.U = nn.Parameter(torch.Tensor(hidden_size, hidden_size * 4))
         self.bias = nn.Parameter(torch.Tensor(hidden_size * 4))
         self.init_weights()
-        #self.lstm = nn.GRU()
 
     def init_weights(self):
         for p in self.parameters():
@@ -197,7 +196,6 @@ class EncoderRNN(nn.Module):
         """
         "*** YOUR CODE HERE ***"
         self.embedding = nn.Embedding(input_size, hidden_size)
-        self.rnn1 = CustomLSTM(hidden_size, hidden_size)
         self.rnn = nn.GRU(hidden_size, hidden_size)
 
 
@@ -207,25 +205,11 @@ class EncoderRNN(nn.Module):
         """
         "*** YOUR CODE HERE ***"
         embedded = self.embedding(input).view(1,1,-1)
-        output, hidden = self.rnn(output, hidden)
+        output, hidden = self.rnn(embedded, hidden)
         return output, hidden
 
     def get_initial_hidden_state(self):
         return torch.zeros(1, 1, self.hidden_size, device=device)
-
-class Attn(nn.Module):
-    '''attention layer'''
-    def __init__(self, hidden_size, max_length=MAX_LENGTH):
-        super(Attn, self).__init__()
-        self.hidden_size = hidden_size
-        self.max_length = max_length
-        self.attn = nn.Linear(self.hidden_size * 2, self.max_length)
-        
-    
-    def forward(self, input, hidden):
-        outputs = self.attn(input, 1)
-        ouputs = F.softmax(outputs, dim=1)
-        return outputs
 
 class AttnDecoderRNN(nn.Module):
     """the class for the decoder 
@@ -261,7 +245,6 @@ class AttnDecoderRNN(nn.Module):
         
         "*** YOUR CODE HERE ***"
         embedded = self.embedding(input).view(1,1,-1)
-        #apply dropout
         embedded = self.dropout(embedded)
         
         attn_weights = F.softmax(self.attn(torch.cat((embedded[0], hidden[0]), 1)), dim=1)
@@ -270,6 +253,7 @@ class AttnDecoderRNN(nn.Module):
         output = F.relu(self.context(output).unsqueeze(0))
         output, hidden = self.rnn(output, hidden)
         output = self.out(output[0])
+
         log_softmax = F.log_softmax(output, dim=1)
         return log_softmax, hidden, attn_weights
 
