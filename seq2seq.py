@@ -30,6 +30,7 @@ import torch.nn.functional as F
 from nltk.translate.bleu_score import corpus_bleu
 from torch import optim
 from torch.autograd import Variable
+from torch.nn.utils.rnn import pad_packed_sequence, pack_padded_sequence
 
 
 logging.basicConfig(level=logging.DEBUG,
@@ -41,6 +42,7 @@ logging.basicConfig(level=logging.DEBUG,
 #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = torch.device("cpu")
 
+PAD_token = "<PAD>"
 SOS_token = "<SOS>"
 EOS_token = "<EOS>"
 
@@ -75,6 +77,38 @@ class Vocab:
 
 
 ######################################################################
+def indexes_from_sentence(lang, sentence):
+    return [lang.word2index[word] for word in sentence.split(' ')] + [EOS_token]
+
+def pad_seq(seq, max_length):
+    seq += [PAD_token for i in range(max_length - len(seq))]
+    return seq
+
+def random_batch(batch_size, pairs, input_lang, output_lang):
+    input_seqs = []
+    target_seqs = []
+
+    # Choose random pairs
+    for i in range(batch_size):
+        pair = random.choice(pairs)
+        input_seqs.append(indexes_from_sentence(input_lang, pair[0]))
+        target_seqs.append(indexes_from_sentence(output_lang, pair[1]))
+
+    # Zip into pairs, sort by length (descending), unzip
+    seq_pairs = sorted(zip(input_seqs, target_seqs), key=lambda p: len(p[0]), reverse=True)
+    input_seqs, target_seqs = zip(*seq_pairs)
+
+    # For input and target sequences, get array of lengths and pad with 0s to max length
+    input_lengths = [len(s) for s in input_seqs]
+    input_padded = [pad_seq(s, max(input_lengths)) for s in input_seqs]
+    target_lengths = [len(s) for s in target_seqs]
+    target_padded = [pad_seq(s, max(target_lengths)) for s in target_seqs]
+
+    # Turn padded arrays into (batch x seq) tensors, transpose into (seq x batch)
+    input_var = Variable(torch.LongTensor(input_padded)).transpose(0, 1)
+    target_var = Variable(torch.LongTensor(target_padded)).transpose(0, 1)
+
+    return input_var, input_lengths, target_var, target_lengths
 
 
 def split_lines(input_file):
@@ -136,51 +170,6 @@ def tensors_from_pair(src_vocab, tgt_vocab, pair):
 
 ######################################################################
 
-class CustomLSTM(nn.Module):
-    """class for manually implemented LSTM"""
-    def __init__(self, input_size, hidden_size):
-        super().__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.W = nn.Parameter(torch.Tensor(input_size, hidden_size * 4))
-        self.U = nn.Parameter(torch.Tensor(hidden_size, hidden_size * 4))
-        self.bias = nn.Parameter(torch.Tensor(hidden_size * 4))
-        self.init_weights()
-
-    def init_weights(self):
-        for p in self.parameters():
-            if p.data.ndimensions() > 2:
-                nn.init.xavier_uniform_(p.data)
-            else:
-                nn.init.zeros_(p.data)
-
-    def forward(self, input, hidden):
-        batch_seq, seq_size = input.size()
-        h_t, c_t = hidden
-        hidden_s = []
-
-        for t in range(seq_size):
-            x_t = input[:,t,:]
-            gates = x_t @ self.W + h_t @ self.U + self.bias
-            #input
-            i_t = torch.sigmoid(gates[:,:self.hidden_size])
-            #forget
-            f_t = torch.sigmoid(gates[:,self.hidden_size:self.hidden_size*2])
-            #g
-            g_t = torch.tanh(gates[:,self.hidden*2:self.hidden_size*3])
-            #output
-            o_t = torch.sigmoid(gates[:,self.hidden_size*3])
-
-            c_t = f_t * c_t + i_t * g_t
-            h_t = o_t * torch.tanh(c_t)
-            hidden_s.append(h_t.unsqueeze(0))
-        
-        hidden_s = torch.cat(hidden_s, dim=0)
-        return h_t, c_t
-
-
-
-
 
 class EncoderRNN(nn.Module):
     """the class for the enoder RNN
@@ -199,17 +188,67 @@ class EncoderRNN(nn.Module):
         self.rnn = nn.GRU(hidden_size, hidden_size)
 
 
-    def forward(self, input, hidden):
+    def forward(self, input_seqs, input_lengths, hidden=None):
         """runs the forward pass of the encoder
         returns the output and the hidden state
         """
         "*** YOUR CODE HERE ***"
-        embedded = self.embedding(input).view(1,1,-1)
-        output, hidden = self.rnn(embedded, hidden)
-        return output, hidden
+        embedded = self.embedding(input_seqs)
+        packed = torch.nn.utils.rnn.pack_padded_sequence(embedded, input_lengths)
+        outputs, hidden = self.gru(packed, hidden)
+        outputs, output_lengths = torch.nn.utils.rnn.pad_packed_sequence(outputs) 
+        outputs = outputs[:, :, :self.hidden_size] + outputs[:, : ,self.hidden_size:] 
+        return outputs, hidden
 
     def get_initial_hidden_state(self):
         return torch.zeros(1, 1, self.hidden_size, device=device)
+
+class Attn(nn.Module):
+    def __init__(self, method, hidden_size):
+        super(Attn, self).__init__()
+        
+        self.method = method
+        self.hidden_size = hidden_size
+        
+        if self.method == 'general':
+            self.attn = nn.Linear(self.hidden_size, hidden_size)
+
+        elif self.method == 'concat':
+            self.attn = nn.Linear(self.hidden_size * 2, hidden_size)
+            self.v = nn.Parameter(torch.FloatTensor(1, hidden_size))
+
+    def forward(self, hidden, encoder_outputs):
+        max_len = encoder_outputs.size(0)
+        this_batch_size = encoder_outputs.size(1)
+
+        # Create variable to store attention energies
+        attn_energies = Variable(torch.zeros(this_batch_size, max_len)) # B x S
+
+        # For each batch of encoder outputs
+        for b in range(this_batch_size):
+            # Calculate energy for each encoder output
+            for i in range(max_len):
+                attn_energies[b, i] = self.score(hidden[:, b], encoder_outputs[i, b].unsqueeze(0))
+
+        # Normalize energies to weights in range 0 to 1, resize to 1 x B x S
+        return F.softmax(attn_energies).unsqueeze(1)
+    
+    def score(self, hidden, encoder_output):
+        
+        if self.method == 'dot':
+            energy = hidden.dot(encoder_output)
+            return energy
+        
+        elif self.method == 'general':
+            energy = self.attn(encoder_output)
+            energy = hidden.dot(energy)
+            return energy
+        
+        elif self.method == 'concat':
+            energy = self.attn(torch.cat((hidden, encoder_output), 1))
+            energy = self.v.dot(energy)
+            return energy
+    
 
 class AttnDecoderRNN(nn.Module):
     """the class for the decoder 
@@ -227,13 +266,11 @@ class AttnDecoderRNN(nn.Module):
         """
         "*** YOUR CODE HERE ***"
         #raise NotImplementedError
-        self.embedding = nn.Embedding(self.output_size, self.hidden_size)
-        self.dropout = nn.Dropout(self.dropout_p)
-        self.attn = nn.Linear(self.hidden_size*2, self.max_length)
-        self.context = nn.Linear(self.hidden_size * 2, self.hidden_size)
-        
-        self.rnn = nn.GRU(self.hidden_size, self.hidden_size)
-        self.out = nn.Linear(self.hidden_size, self.output_size)
+        self.embedding = nn.Embedding(output_size, hidden_size)
+        self.dropout = nn.Dropout(dropout_p)
+        self.attn = Attn('concat', hidden_size)
+        self.gru = nn.GRU(hidden_size, hidden_size, n_layers, dropout=dropout_p)
+        self.out = nn.Linear(hidden_size, output_size)
 
 
     def forward(self, input, hidden, encoder_outputs):
@@ -244,18 +281,24 @@ class AttnDecoderRNN(nn.Module):
         """
         
         "*** YOUR CODE HERE ***"
-        embedded = self.embedding(input).view(1,1,-1)
-        embedded = self.dropout(embedded)
+        word_embedded = self.embedding(input).view(1, 1, -1) # S=1 x B x N
+        word_embedded = self.dropout(word_embedded)
         
-        attn_weights = F.softmax(self.attn(torch.cat((embedded[0], hidden[0]), 1)), dim=1)
-        context = torch.bmm(attn_weights.unsqueeze(0), encoder_outputs.unsqueeze(0))
-        output = torch.cat((embedded[0], context[0]), 1)
-        output = F.relu(self.context(output).unsqueeze(0))
-        output, hidden = self.rnn(output, hidden)
-        output = self.out(output[0])
-
-        log_softmax = F.log_softmax(output, dim=1)
-        return log_softmax, hidden, attn_weights
+        # Calculate attention weights and apply to encoder outputs
+        attn_weights = self.attn(hidden[-1], encoder_outputs)
+        context = attn_weights.bmm(encoder_outputs.transpose(0, 1)) # B x 1 x N
+        context = context.transpose(0, 1) # 1 x B x N
+        
+        # Combine embedded input word and attended context, run through RNN
+        rnn_input = torch.cat((word_embedded, context), 2)
+        output, hidden = self.gru(rnn_input, hidden)
+        
+        # Final output layer
+        output = output.squeeze(0) # B x N
+        output = F.log_softmax(self.out(torch.cat((output, context), 1)))
+        
+        # Return final output, hidden state, and attention weights (for visualization)
+        return output, hidden, attn_weights
 
     def get_initial_hidden_state(self):
         return torch.zeros(1, 1, self.hidden_size, device=device)
