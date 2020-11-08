@@ -5,7 +5,7 @@
 This code is based on the tutorial by Sean Robertson <https://github.com/spro/practical-pytorch> found here:
 https://pytorch.org/tutorials/intermediate/seq2seq_translation_tutorial.html
 
-Students *MAY NOT* view the above tutorial or use it as a reference in any way. 
+Students *MAY NOT* view the above tutorial or use it as a reference in any way.
 """
 
 
@@ -18,10 +18,10 @@ import time
 from io import open
 
 import matplotlib
-#if you are running on the gradx/ugradx/ another cluster, 
+#if you are running on the gradx/ugradx/ another cluster,
 #you will need the following line
 #if you run on a local machine, you can comment it out
-#matplotlib.use('agg') 
+#matplotlib.use('agg')
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import torch
@@ -37,7 +37,7 @@ logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s %(levelname)s %(message)s')
 
 # we are forcing the use of cpu, if you have access to a gpu, you can set the flag to "cuda"
-# make sure you are very careful if you are using a gpu on a shared cluster/grid, 
+# make sure you are very careful if you are using a gpu on a shared cluster/grid,
 # it can be very easy to confict with other people's jobs.
 #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = torch.device("cpu")
@@ -116,7 +116,7 @@ def split_lines(input_file):
     first src sentence|||first tgt sentence
     second src sentence|||second tgt sentence
     into a list of things like
-    [("first src sentence", "first tgt sentence"), 
+    [("first src sentence", "first tgt sentence"),
      ("second src sentence", "second tgt sentence")]
     """
     logging.info("Reading lines of %s...", input_file)
@@ -178,7 +178,7 @@ class EncoderRNN(nn.Module):
         super(EncoderRNN, self).__init__()
         self.hidden_size = hidden_size
         """Initilize a word embedding and bi-directional LSTM encoder
-        For this assignment, you should *NOT* use nn.LSTM. 
+        For this assignment, you should *NOT* use nn.LSTM.
         Instead, you should implement the equations yourself.
         See, for example, https://en.wikipedia.org/wiki/Long_short-term_memory#LSTM_with_a_forget_gate
         You should make your LSTM modular and re-use it in the Decoder.
@@ -194,10 +194,13 @@ class EncoderRNN(nn.Module):
         """
         "*** YOUR CODE HERE ***"
         embedded = self.embedding(input_seqs)
+        input_lengths = input_lengths.flatten()
+        #print("hello?")
+        print("UMMMMM", input_lengths, input_lengths.size())
         packed = torch.nn.utils.rnn.pack_padded_sequence(embedded, input_lengths)
         outputs, hidden = self.gru(packed, hidden)
-        outputs, output_lengths = torch.nn.utils.rnn.pad_packed_sequence(outputs) 
-        outputs = outputs[:, :, :self.hidden_size] + outputs[:, : ,self.hidden_size:] 
+        outputs, output_lengths = torch.nn.utils.rnn.pad_packed_sequence(outputs)
+        outputs = outputs[:, :, :self.hidden_size] + outputs[:, : ,self.hidden_size:]
         return outputs, hidden
 
     def get_initial_hidden_state(self):
@@ -206,10 +209,10 @@ class EncoderRNN(nn.Module):
 class Attn(nn.Module):
     def __init__(self, method, hidden_size):
         super(Attn, self).__init__()
-        
+
         self.method = method
         self.hidden_size = hidden_size
-        
+
         if self.method == 'general':
             self.attn = nn.Linear(self.hidden_size, hidden_size)
 
@@ -232,26 +235,26 @@ class Attn(nn.Module):
 
         # Normalize energies to weights in range 0 to 1, resize to 1 x B x S
         return F.softmax(attn_energies).unsqueeze(1)
-    
+
     def score(self, hidden, encoder_output):
-        
+
         if self.method == 'dot':
             energy = hidden.dot(encoder_output)
             return energy
-        
+
         elif self.method == 'general':
             energy = self.attn(encoder_output)
             energy = hidden.dot(energy)
             return energy
-        
+
         elif self.method == 'concat':
             energy = self.attn(torch.cat((hidden, encoder_output), 1))
             energy = self.v.dot(energy)
             return energy
-    
+
 
 class AttnDecoderRNN(nn.Module):
-    """the class for the decoder 
+    """the class for the decoder
     """
     def __init__(self, hidden_size, output_size, dropout_p=0.1, max_length=MAX_LENGTH):
         super(AttnDecoderRNN, self).__init__()
@@ -261,7 +264,7 @@ class AttnDecoderRNN(nn.Module):
         self.max_length = max_length
 
         self.dropout = nn.Dropout(self.dropout_p)
-        
+
         """Initilize your word embedding, decoder LSTM, and weights needed for your attention here
         """
         "*** YOUR CODE HERE ***"
@@ -269,34 +272,34 @@ class AttnDecoderRNN(nn.Module):
         self.embedding = nn.Embedding(output_size, hidden_size)
         self.dropout = nn.Dropout(dropout_p)
         self.attn = Attn('concat', hidden_size)
-        self.gru = nn.GRU(hidden_size, hidden_size, n_layers, dropout=dropout_p)
+        self.gru = nn.GRU(hidden_size, hidden_size, num_layers=1, dropout=dropout_p)
         self.out = nn.Linear(hidden_size, output_size)
 
 
     def forward(self, input, hidden, encoder_outputs):
         """runs the forward pass of the decoder
         returns the log_softmax, hidden state, and attn_weights
-        
+
         Dropout (self.dropout) should be applied to the word embeddings.
         """
-        
+
         "*** YOUR CODE HERE ***"
         word_embedded = self.embedding(input).view(1, 1, -1) # S=1 x B x N
         word_embedded = self.dropout(word_embedded)
-        
+
         # Calculate attention weights and apply to encoder outputs
         attn_weights = self.attn(hidden[-1], encoder_outputs)
         context = attn_weights.bmm(encoder_outputs.transpose(0, 1)) # B x 1 x N
         context = context.transpose(0, 1) # 1 x B x N
-        
+
         # Combine embedded input word and attended context, run through RNN
         rnn_input = torch.cat((word_embedded, context), 2)
         output, hidden = self.gru(rnn_input, hidden)
-        
+
         # Final output layer
         output = output.squeeze(0) # B x N
         output = F.log_softmax(self.out(torch.cat((output, context), 1)))
-        
+
         # Return final output, hidden state, and attention weights (for visualization)
         return output, hidden, attn_weights
 
@@ -312,7 +315,7 @@ def train(input_tensor, target_tensor, encoder, decoder, optimizer, criterion, m
     # make sure the encoder and decoder are in training mode so dropout is applied
     encoder.train()
     decoder.train()
-    
+
 
     "*** YOUR CODE HERE ***"
     input_length = input_tensor.size(0)
@@ -326,10 +329,9 @@ def train(input_tensor, target_tensor, encoder, decoder, optimizer, criterion, m
 
     # loop through input, update loss and optimizer
     for e_i in range(input_length):
-        encoder_output, encoder_hidden = encoder(input_tensor[e_i],
-                                                 encoder_hidden)
+        encoder_output, encoder_hidden = encoder(input_tensor[e_i], encoder_hidden)
         encoder_outputs[e_i] += encoder_output[0, 0]
-        
+
     decoder_input = torch.tensor([[SOS_index]], device=device)
 
     decoder_hidden = encoder_hidden
@@ -349,8 +351,8 @@ def train(input_tensor, target_tensor, encoder, decoder, optimizer, criterion, m
     #backpropogation
     loss.backward()
     optimizer.step()
-    
-    return loss.item() 
+
+    return loss.item()
 
 
 
@@ -431,12 +433,12 @@ def translate_random_sentence(encoder, decoder, pairs, src_vocab, tgt_vocab, n=1
 ######################################################################
 
 def show_attention(input_sentence, output_words, attentions):
-    """visualize the attention mechanism. And save it to a file. 
+    """visualize the attention mechanism. And save it to a file.
     Plots should look roughly like this: https://i.stack.imgur.com/PhtQi.png
     You plots should include axis labels and a legend.
     you may want to use matplotlib.
     """
-    
+
     "*** YOUR CODE HERE ***"
     #raise NotImplementedError
     fig = plt.figure()
@@ -512,7 +514,7 @@ def main():
     # process the training, dev, test files
 
     # Create vocab from training data, or load if checkpointed
-    # also set iteration 
+    # also set iteration
     if args.load_checkpoint is not None:
         state = torch.load(args.load_checkpoint[0])
         iter_num = state['iter_num']
@@ -604,4 +606,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-    
