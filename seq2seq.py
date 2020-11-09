@@ -107,8 +107,8 @@ def random_batch(batch_size, pairs, input_lang, output_lang):
     target_padded = [pad_seq(s, max(target_lengths)) for s in target_seqs]
 
     # Turn padded arrays into (batch x seq) tensors, transpose into (seq x batch)
-    input_var = torch.tensor(input_padded, dtype=torch.long, device=device).view(-1,1)
-    target_var = torch.tensor(target_padded, dtype=torch.long, device=device).view(-1,1)
+    input_var = Variable(torch.LongTensor(input_padded)).transpose(0, 1)
+    target_var = Variable(torch.LongTensor(target_padded)).transpose(0, 1)
 
     return input_var, input_lengths, target_var, target_lengths
 
@@ -197,9 +197,8 @@ class EncoderRNN(nn.Module):
         "*** YOUR CODE HERE ***"
         embedded = self.embedding(input_seqs)
         packed = torch.nn.utils.rnn.pack_padded_sequence(embedded, input_lengths)
-        outputs, hidden = self.gru(packed, hidden)
-        outputs, output_lengths = torch.nn.utils.rnn.pad_packed_sequence(outputs) 
-        outputs = outputs[:, :, :self.hidden_size] + outputs[:, : ,self.hidden_size:] 
+        outputs, hidden = self.rnn(packed, hidden)
+        outputs, output_lengths = torch.nn.utils.rnn.pad_packed_sequence(outputs)
         return outputs, hidden
 
     def get_initial_hidden_state(self):
@@ -230,10 +229,11 @@ class Attn(nn.Module):
         for b in range(this_batch_size):
             # Calculate energy for each encoder output
             for i in range(max_len):
-                attn_energies[b, i] = self.score(hidden[:, b], encoder_outputs[i, b].unsqueeze(0))
+                h = hidden[:,b].squeeze()
+                attn_energies[b, i] = self.score(h, encoder_outputs[i, b])
 
         # Normalize energies to weights in range 0 to 1, resize to 1 x B x S
-        return F.softmax(attn_energies).unsqueeze(1)
+        return F.softmax(attn_energies, dim=0).unsqueeze(1)
     
     def score(self, hidden, encoder_output):
         
@@ -255,19 +255,20 @@ class Attn(nn.Module):
 class AttnDecoderRNN(nn.Module):
     """the class for the decoder 
     """
-    def __init__(self, hidden_size, output_size, dropout_p=0.1, max_length=MAX_LENGTH):
+    def __init__(self, attn_model, hidden_size, output_size, dropout_p=0.1, max_length=MAX_LENGTH):
         super(AttnDecoderRNN, self).__init__()
         self.attn_model = attn_model
         self.hidden_size = hidden_size
         self.output_size = output_size
-        self.dropout = dropout
+        self.dropout_p = dropout_p
 
         # layers
         self.embedding = nn.Embedding(output_size, hidden_size)
-        self.embedding_dropout = nn.Dropout(dropout)
-        self.gru = nn.GRU(hidden_size, hidden_size, dropout=dropout)
+        self.embedding_dropout = nn.Dropout(dropout_p)
+        self.gru = nn.GRU(hidden_size, hidden_size, dropout=dropout_p)
         self.concat = nn.Linear(hidden_size * 2, hidden_size)
         self.out = nn.Linear(hidden_size, output_size)
+        self.attn = Attn(self.attn_model, hidden_size)
 
     def forward(self, input, hidden, encoder_outputs):
         """runs the forward pass of the decoder
@@ -297,7 +298,7 @@ class AttnDecoderRNN(nn.Module):
         rnn_output = rnn_output.squeeze(0) # S=1 x B x N -> B x N
         context = context.squeeze(1)       # B x S=1 x N -> B x N
         concat_input = torch.cat((rnn_output, context), 1)
-        concat_output = F.tanh(self.concat(concat_input))
+        concat_output = torch.tanh(self.concat(concat_input))
 
         # Finally predict next token (Luong eq. 6, without softmax)
         output = self.out(concat_output)
@@ -311,17 +312,14 @@ class AttnDecoderRNN(nn.Module):
 
 ######################################################################
 
-def train(input_tensor, target_tensor, encoder, decoder, optimizer, criterion, max_length=MAX_LENGTH):
-    encoder_hidden = encoder.get_initial_hidden_state()
+def train(input_batches, input_lengths, target_batches, target_lengths, encoder, decoder, optimizer, criterion, batch_size, max_length=MAX_LENGTH):
 
     # make sure the encoder and decoder are in training mode so dropout is applied
     encoder.train()
     decoder.train()
-    
+    loss = 0
 
     "*** YOUR CODE HERE ***"
-    input_length = input_tensor.size(0)
-    target_length = target_tensor.size(0)
     optimizer.zero_grad()
 
     # same structure as translate below
@@ -329,16 +327,13 @@ def train(input_tensor, target_tensor, encoder, decoder, optimizer, criterion, m
     encoder_outputs = torch.zeros(max_length, encoder.hidden_size, device=device)
 
 
-    # loop through input, update loss and optimizer
-    for e_i in range(input_length):
-        encoder_output, encoder_hidden = encoder(input_tensor[e_i],
-                                                 encoder_hidden)
-        encoder_outputs[e_i] += encoder_output[0, 0]
+    encoder_outputs, encoder_hidden = encoder(input_batches, input_lengths)
         
-    decoder_input = torch.tensor([[SOS_index]], device=device)
-
+    # prepare decoder
+    decoder_input = torch.tensor([[SOS_index] * batch_size], device=device)
     decoder_hidden = encoder_hidden
-    loss = 0
+
+    
     decoder_attentions = torch.zeros(max_length, max_length)
     # loop through decoder
     for d_i in range(target_length):
@@ -624,7 +619,31 @@ if __name__ == '__main__':
     small_batch_size = 3
     input_batches, input_lengths, target_batches, target_lengths = random_batch(small_batch_size, pairs, input_lang, output_lang)
 
-    print('input_batches', input_batches.size()) # (max_len x batch_size)
-    print('target_batches', target_batches.size()) # (max_len x batch_size)
+    small_hidden_size = 8
+    encoder_test = EncoderRNN(input_lang.n_words, small_hidden_size)
+    decoder_test = AttnDecoderRNN("general", small_hidden_size, output_lang.n_words)
+    encoder_outputs, encoder_hidden = encoder_test(input_batches, input_lengths, None)
+
+    print('encoder_outputs', encoder_outputs.size()) # max_len x batch_size x hidden_size
+    print('encoder_hidden', encoder_hidden.size()) # n_layers * 2 x batch_size x hidden_size
+
+    max_target_length = max(target_lengths)
+
+    # Prepare decoder input and outputs
+    decoder_input = Variable(torch.LongTensor([SOS_index] * small_batch_size))
+    decoder_hidden = encoder_hidden[:1] # Use last (forward) hidden state from encoder
+    all_decoder_outputs = Variable(torch.zeros(max_target_length, small_batch_size, decoder_test.output_size))
+
+    # Run through decoder one time step at a time
+    for t in range(max_target_length):
+        decoder_output, decoder_hidden, decoder_attn = decoder_test(
+            decoder_input, decoder_hidden, encoder_outputs
+        )
+        all_decoder_outputs[t] = decoder_output # Store this step's outputs
+        decoder_input = target_batches[t] # Next input is current target
+
+    print(all_decoder_outputs.size())
+    #print('input_batches', input_batches.size()) 
+    #print('target_batches', target_batches.size()) 
 
     
