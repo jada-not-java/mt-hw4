@@ -46,8 +46,9 @@ PAD_token = "<PAD>"
 SOS_token = "<SOS>"
 EOS_token = "<EOS>"
 
-SOS_index = 0
-EOS_index = 1
+PAD_index = 0
+SOS_index = 1
+EOS_index = 2
 MAX_LENGTH = 15
 teacher_force_ratio = 0.5
 
@@ -57,10 +58,11 @@ class Vocab:
     """
     def __init__(self, lang_code):
         self.lang_code = lang_code
+        self.cut = False
         self.word2index = {}
         self.word2count = {}
-        self.index2word = {SOS_index: SOS_token, EOS_index: EOS_token}
-        self.n_words = 2  # Count SOS and EOS
+        self.index2word = {PAD_index: PAD_token, SOS_index: SOS_token, EOS_index: EOS_token}
+        self.n_words = 3 
 
     def add_sentence(self, sentence):
         for word in sentence.split(' '):
@@ -81,7 +83,7 @@ def indexes_from_sentence(lang, sentence):
     return [lang.word2index[word] for word in sentence.split(' ')] + [EOS_token]
 
 def pad_seq(seq, max_length):
-    seq += [PAD_token for i in range(max_length - len(seq))]
+    seq += [0 for i in range(max_length - len(seq))]
     return seq
 
 def random_batch(batch_size, pairs, input_lang, output_lang):
@@ -105,8 +107,8 @@ def random_batch(batch_size, pairs, input_lang, output_lang):
     target_padded = [pad_seq(s, max(target_lengths)) for s in target_seqs]
 
     # Turn padded arrays into (batch x seq) tensors, transpose into (seq x batch)
-    input_var = Variable(torch.LongTensor(input_padded)).transpose(0, 1)
-    target_var = Variable(torch.LongTensor(target_padded)).transpose(0, 1)
+    input_var = torch.tensor(input_padded, dtype=torch.long, device=device).view(-1,1)
+    target_var = torch.tensor(target_padded, dtype=torch.long, device=device).view(-1,1)
 
     return input_var, input_lengths, target_var, target_lengths
 
@@ -142,10 +144,10 @@ def make_vocabs(src_lang_code, tgt_lang_code, train_file):
     logging.info('%s (src) vocab size: %s', src_vocab.lang_code, src_vocab.n_words)
     logging.info('%s (tgt) vocab size: %s', tgt_vocab.lang_code, tgt_vocab.n_words)
 
-    return src_vocab, tgt_vocab
+    return src_vocab, tgt_vocab, train_pairs
 
 ######################################################################
-
+'''
 def tensor_from_sentence(vocab, sentence):
     """creates a tensor from a raw sentence
     """
@@ -166,7 +168,7 @@ def tensors_from_pair(src_vocab, tgt_vocab, pair):
     input_tensor = tensor_from_sentence(src_vocab, pair[0])
     target_tensor = tensor_from_sentence(tgt_vocab, pair[1])
     return input_tensor, target_tensor
-
+'''
 
 ######################################################################
 
@@ -255,23 +257,17 @@ class AttnDecoderRNN(nn.Module):
     """
     def __init__(self, hidden_size, output_size, dropout_p=0.1, max_length=MAX_LENGTH):
         super(AttnDecoderRNN, self).__init__()
+        self.attn_model = attn_model
         self.hidden_size = hidden_size
         self.output_size = output_size
-        self.dropout_p = dropout_p
-        self.max_length = max_length
+        self.dropout = dropout
 
-        self.dropout = nn.Dropout(self.dropout_p)
-        
-        """Initilize your word embedding, decoder LSTM, and weights needed for your attention here
-        """
-        "*** YOUR CODE HERE ***"
-        #raise NotImplementedError
+        # layers
         self.embedding = nn.Embedding(output_size, hidden_size)
-        self.dropout = nn.Dropout(dropout_p)
-        self.attn = Attn('concat', hidden_size)
-        self.gru = nn.GRU(hidden_size, hidden_size, n_layers, dropout=dropout_p)
+        self.embedding_dropout = nn.Dropout(dropout)
+        self.gru = nn.GRU(hidden_size, hidden_size, dropout=dropout)
+        self.concat = nn.Linear(hidden_size * 2, hidden_size)
         self.out = nn.Linear(hidden_size, output_size)
-
 
     def forward(self, input, hidden, encoder_outputs):
         """runs the forward pass of the decoder
@@ -281,22 +277,31 @@ class AttnDecoderRNN(nn.Module):
         """
         
         "*** YOUR CODE HERE ***"
-        word_embedded = self.embedding(input).view(1, 1, -1) # S=1 x B x N
-        word_embedded = self.dropout(word_embedded)
         
         # Calculate attention weights and apply to encoder outputs
-        attn_weights = self.attn(hidden[-1], encoder_outputs)
-        context = attn_weights.bmm(encoder_outputs.transpose(0, 1)) # B x 1 x N
-        context = context.transpose(0, 1) # 1 x B x N
+        batch_size = input.size(0)
+        embedded = self.embedding(input)
+        embedded = self.embedding_dropout(embedded)
+        embedded = embedded.view(1, batch_size, self.hidden_size)
         
         # Combine embedded input word and attended context, run through RNN
-        rnn_input = torch.cat((word_embedded, context), 2)
-        output, hidden = self.gru(rnn_input, hidden)
+        rnn_output, hidden = self.gru(embedded, hidden)
         
-        # Final output layer
-        output = output.squeeze(0) # B x N
-        output = F.log_softmax(self.out(torch.cat((output, context), 1)))
-        
+        # Calculate attention from current RNN state and all encoder outputs;
+        # apply to encoder outputs to get weighted average
+        attn_weights = self.attn(rnn_output, encoder_outputs)
+        context = attn_weights.bmm(encoder_outputs.transpose(0, 1)) # B x S=1 x N
+
+        # Attentional vector using the RNN hidden state and context vector
+        # concatenated together (Luong eq. 5)
+        rnn_output = rnn_output.squeeze(0) # S=1 x B x N -> B x N
+        context = context.squeeze(1)       # B x S=1 x N -> B x N
+        concat_input = torch.cat((rnn_output, context), 1)
+        concat_output = F.tanh(self.concat(concat_input))
+
+        # Finally predict next token (Luong eq. 6, without softmax)
+        output = self.out(concat_output)
+
         # Return final output, hidden state, and attention weights (for visualization)
         return output, hidden, attn_weights
 
@@ -603,5 +608,23 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    #main()
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--src_lang', default='fr',
+                    help='Source (input) language code, e.g. "fr"')
+    ap.add_argument('--tgt_lang', default='en',
+                    help='Source (input) language code, e.g. "en"')
+    ap.add_argument('--train_file', default='data/fren.train.bpe',
+                    help='training file. each line should have a source sentence,' +
+                         'followed by "|||", followed by a target sentence')
+    args = ap.parse_args()
+    
+    input_lang, output_lang, pairs = make_vocabs(args.src_lang, args.tgt_lang, args.train_file)
+
+    small_batch_size = 3
+    input_batches, input_lengths, target_batches, target_lengths = random_batch(small_batch_size, pairs, input_lang, output_lang)
+
+    print('input_batches', input_batches.size()) # (max_len x batch_size)
+    print('target_batches', target_batches.size()) # (max_len x batch_size)
+
     
