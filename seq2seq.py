@@ -80,7 +80,7 @@ class Vocab:
 
 ######################################################################
 def indexes_from_sentence(lang, sentence):
-    return [lang.word2index[word] for word in sentence.split(' ')] + [EOS_token]
+    return [lang.word2index[word] for word in sentence.split(' ')] + [EOS_index]
 
 def pad_seq(seq, max_length):
     seq += [0 for i in range(max_length - len(seq))]
