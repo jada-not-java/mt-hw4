@@ -79,22 +79,22 @@ class Vocab:
 
 
 ######################################################################
-def indexes_from_sentence(lang, sentence):
+def add_indices_from_sentence(lang, sentence):
     return [lang.word2index[word] for word in sentence.split(' ')] + [EOS_index]
 
-def pad_seq(seq, max_length):
+def add_padding(seq, max_length):
     seq += [0 for i in range(max_length - len(seq))]
     return seq
 
-def random_batch(batch_size, pairs, input_lang, output_lang):
+def mini_batch(batch_size, pairs, input_lang, output_lang):
     input_seqs = []
     target_seqs = []
 
     # Choose random pairs
     for i in range(batch_size):
         pair = random.choice(pairs)
-        input_seqs.append(indexes_from_sentence(input_lang, pair[0]))
-        target_seqs.append(indexes_from_sentence(output_lang, pair[1]))
+        input_seqs.append(add_indices_from_sentence(input_lang, pair[0]))
+        target_seqs.append(add_indices_from_sentence(output_lang, pair[1]))
 
     # Zip into pairs, sort by length (descending), unzip
     seq_pairs = sorted(zip(input_seqs, target_seqs), key=lambda p: len(p[0]), reverse=True)
@@ -102,9 +102,9 @@ def random_batch(batch_size, pairs, input_lang, output_lang):
 
     # For input and target sequences, get array of lengths and pad with 0s to max length
     input_lengths = [len(s) for s in input_seqs]
-    input_padded = [pad_seq(s, max(input_lengths)) for s in input_seqs]
+    input_padded = [add_padding(s, max(input_lengths)) for s in input_seqs]
     target_lengths = [len(s) for s in target_seqs]
-    target_padded = [pad_seq(s, max(target_lengths)) for s in target_seqs]
+    target_padded = [add_padding(s, max(target_lengths)) for s in target_seqs]
 
     # Turn padded arrays into (batch x seq) tensors, transpose into (seq x batch)
     input_var = Variable(torch.LongTensor(input_padded)).transpose(0, 1)
@@ -147,28 +147,6 @@ def make_vocabs(src_lang_code, tgt_lang_code, train_file):
     return src_vocab, tgt_vocab, train_pairs
 
 ######################################################################
-'''
-def tensor_from_sentence(vocab, sentence):
-    """creates a tensor from a raw sentence
-    """
-    indexes = []
-    for word in sentence.split():
-        try:
-            indexes.append(vocab.word2index[word])
-        except KeyError:
-            pass
-            # logging.warn('skipping unknown subword %s. Joint BPE can produces subwords at test time which are not in vocab. As long as this doesnt happen every sentence, this is fine.', word)
-    indexes.append(EOS_index)
-    return torch.tensor(indexes, dtype=torch.long, device=device).view(-1, 1)
-
-
-def tensors_from_pair(src_vocab, tgt_vocab, pair):
-    """creates a tensor from a raw sentence pair
-    """
-    input_tensor = tensor_from_sentence(src_vocab, pair[0])
-    target_tensor = tensor_from_sentence(tgt_vocab, pair[1])
-    return input_tensor, target_tensor
-'''
 
 ######################################################################
 
@@ -204,9 +182,9 @@ class EncoderRNN(nn.Module):
     def get_initial_hidden_state(self):
         return torch.zeros(1, 1, self.hidden_size, device=device)
 
-class Attn(nn.Module):
+class AttentionLayer(nn.Module):
     def __init__(self, method, hidden_size):
-        super(Attn, self).__init__()
+        super(AttentionLayer, self).__init__()
         
         self.method = method
         self.hidden_size = hidden_size
@@ -222,17 +200,15 @@ class Attn(nn.Module):
         max_len = encoder_outputs.size(0)
         this_batch_size = encoder_outputs.size(1)
 
-        # Create variable to store attention energies
-        attn_energies = Variable(torch.zeros(this_batch_size, max_len)) # B x S
+        attn_energies = Variable(torch.zeros(this_batch_size, max_len))
 
-        # For each batch of encoder outputs
         for b in range(this_batch_size):
-            # Calculate energy for each encoder output
+            
             for i in range(max_len):
                 h = hidden[:,b].squeeze()
                 attn_energies[b, i] = self.score(h, encoder_outputs[i, b])
 
-        # Normalize energies to weights in range 0 to 1, resize to 1 x B x S
+        
         return F.softmax(attn_energies, dim=0).unsqueeze(1)
     
     def score(self, hidden, encoder_output):
@@ -268,7 +244,7 @@ class AttnDecoderRNN(nn.Module):
         self.gru = nn.GRU(hidden_size, hidden_size, dropout=dropout_p)
         self.concat = nn.Linear(hidden_size * 2, hidden_size)
         self.out = nn.Linear(hidden_size, output_size)
-        self.attn = Attn(self.attn_model, hidden_size)
+        self.attn = AttentionLayer(self.attn_model, hidden_size)
 
     def forward(self, input, hidden, encoder_outputs):
         """runs the forward pass of the decoder
@@ -285,22 +261,17 @@ class AttnDecoderRNN(nn.Module):
         embedded = self.embedding_dropout(embedded)
         embedded = embedded.view(1, batch_size, self.hidden_size)
         
-        # Combine embedded input word and attended context, run through RNN
         rnn_output, hidden = self.gru(embedded, hidden)
         
-        # Calculate attention from current RNN state and all encoder outputs;
-        # apply to encoder outputs to get weighted average
         attn_weights = self.attn(rnn_output, encoder_outputs)
-        context = attn_weights.bmm(encoder_outputs.transpose(0, 1)) # B x S=1 x N
+        context = attn_weights.bmm(encoder_outputs.transpose(0, 1)) 
 
-        # Attentional vector using the RNN hidden state and context vector
-        # concatenated together (Luong eq. 5)
-        rnn_output = rnn_output.squeeze(0) # S=1 x B x N -> B x N
-        context = context.squeeze(1)       # B x S=1 x N -> B x N
+        rnn_output = rnn_output.squeeze(0) 
+        context = context.squeeze(1)       
         concat_input = torch.cat((rnn_output, context), 1)
         concat_output = torch.tanh(self.concat(concat_input))
 
-        # Finally predict next token (Luong eq. 6, without softmax)
+        
         output = self.out(concat_output)
 
         # Return final output, hidden state, and attention weights (for visualization)
@@ -330,22 +301,23 @@ def train(input_batches, input_lengths, target_batches, target_lengths, encoder,
     encoder_outputs, encoder_hidden = encoder(input_batches, input_lengths)
         
     # prepare decoder
-    decoder_input = torch.tensor([[SOS_index] * batch_size], device=device)
+    decoder_input = torch.tensor([[SOS_index] * batch_size], device=device).transpose(0,1)
     decoder_hidden = encoder_hidden
+    max_target_length = max(target_lengths)
+    all_decoder_outputs = Variable(torch.zeros(max_target_length, batch_size, decoder.output_size))
 
     
-    decoder_attentions = torch.zeros(max_length, max_length)
-    # loop through decoder
-    for d_i in range(target_length):
-        #optimizer.zero_grad()
-        decoder_output, decoder_hidden, decoder_attention = decoder(
-            decoder_input, decoder_hidden, encoder_outputs)
-        v, top_i = decoder_output.topk(1)
-        decoder_input = top_i.squeeze().detach()
-        c = criterion(decoder_output, target_tensor[d_i])
-        loss += c
-        if decoder_input.item() == EOS_token:
-            break
+    for t in range(max_target_length):
+        decoder_output, decoder_hidden, decoder_attn = decoder(
+            decoder_input, decoder_hidden, encoder_outputs
+        )
+
+        all_decoder_outputs[t] = decoder_output
+        decoder_input = target_batches[t] 
+
+    #how to account for loss
+    loss += criterion(all_decoder_outputs, target_batches)
+
     #backpropogation
     loss.backward()
     optimizer.step()
@@ -553,11 +525,8 @@ def main():
 
     while iter_num < args.n_iters:
         iter_num += 1
-        training_pair = tensors_from_pair(src_vocab, tgt_vocab, random.choice(train_pairs))
-        input_tensor = training_pair[0]
-        target_tensor = training_pair[1]
-        loss = train(input_tensor, target_tensor, encoder,
-                     decoder, optimizer, criterion)
+        input_batches, input_lengths, target_batches, target_lengths = mini_batch(8, train_pairs, args.src_lang, args.tgt_lang)
+        loss = train(input_batches,input_lengths,)
         print_loss_total += loss
 
         if iter_num % args.checkpoint_every == 0:
@@ -603,47 +572,7 @@ def main():
 
 
 if __name__ == '__main__':
-    #main()
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--src_lang', default='fr',
-                    help='Source (input) language code, e.g. "fr"')
-    ap.add_argument('--tgt_lang', default='en',
-                    help='Source (input) language code, e.g. "en"')
-    ap.add_argument('--train_file', default='data/fren.train.bpe',
-                    help='training file. each line should have a source sentence,' +
-                         'followed by "|||", followed by a target sentence')
-    args = ap.parse_args()
+    main()
     
-    input_lang, output_lang, pairs = make_vocabs(args.src_lang, args.tgt_lang, args.train_file)
-
-    small_batch_size = 3
-    input_batches, input_lengths, target_batches, target_lengths = random_batch(small_batch_size, pairs, input_lang, output_lang)
-
-    small_hidden_size = 8
-    encoder_test = EncoderRNN(input_lang.n_words, small_hidden_size)
-    decoder_test = AttnDecoderRNN("general", small_hidden_size, output_lang.n_words)
-    encoder_outputs, encoder_hidden = encoder_test(input_batches, input_lengths, None)
-
-    print('encoder_outputs', encoder_outputs.size()) # max_len x batch_size x hidden_size
-    print('encoder_hidden', encoder_hidden.size()) # n_layers * 2 x batch_size x hidden_size
-
-    max_target_length = max(target_lengths)
-
-    # Prepare decoder input and outputs
-    decoder_input = Variable(torch.LongTensor([SOS_index] * small_batch_size))
-    decoder_hidden = encoder_hidden[:1] # Use last (forward) hidden state from encoder
-    all_decoder_outputs = Variable(torch.zeros(max_target_length, small_batch_size, decoder_test.output_size))
-
-    # Run through decoder one time step at a time
-    for t in range(max_target_length):
-        decoder_output, decoder_hidden, decoder_attn = decoder_test(
-            decoder_input, decoder_hidden, encoder_outputs
-        )
-        all_decoder_outputs[t] = decoder_output # Store this step's outputs
-        decoder_input = target_batches[t] # Next input is current target
-
-    print(all_decoder_outputs.size())
-    #print('input_batches', input_batches.size()) 
-    #print('target_batches', target_batches.size()) 
 
     
