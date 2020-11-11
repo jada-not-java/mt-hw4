@@ -79,39 +79,6 @@ class Vocab:
 
 
 ######################################################################
-def add_indices_from_sentence(lang, sentence):
-    return [lang.word2index[word] for word in sentence.split(' ')] + [EOS_index]
-
-def add_padding(seq, max_length):
-    seq += [0 for i in range(max_length - len(seq))]
-    return seq
-
-def mini_batch(batch_size, pairs, input_lang, output_lang):
-    input_seqs = []
-    target_seqs = []
-
-    # Choose random pairs
-    for i in range(batch_size):
-        pair = random.choice(pairs)
-        input_seqs.append(add_indices_from_sentence(input_lang, pair[0]))
-        target_seqs.append(add_indices_from_sentence(output_lang, pair[1]))
-
-    # Zip into pairs, sort by length (descending), unzip
-    seq_pairs = sorted(zip(input_seqs, target_seqs), key=lambda p: len(p[0]), reverse=True)
-    input_seqs, target_seqs = zip(*seq_pairs)
-
-    # For input and target sequences, get array of lengths and pad with 0s to max length
-    input_lengths = [len(s) for s in input_seqs]
-    input_padded = [add_padding(s, max(input_lengths)) for s in input_seqs]
-    target_lengths = [len(s) for s in target_seqs]
-    target_padded = [add_padding(s, max(target_lengths)) for s in target_seqs]
-
-    # Turn padded arrays into (batch x seq) tensors, transpose into (seq x batch)
-    input_var = Variable(torch.LongTensor(input_padded)).transpose(0, 1)
-    target_var = Variable(torch.LongTensor(target_padded)).transpose(0, 1)
-
-    return input_var, input_lengths, target_var, target_lengths
-
 
 def split_lines(input_file):
     """split a file like:
@@ -147,6 +114,39 @@ def make_vocabs(src_lang_code, tgt_lang_code, train_file):
     return src_vocab, tgt_vocab, train_pairs
 
 ######################################################################
+
+def add_indices_from_sentence(lang, sentence):
+    return [lang.word2index[word] for word in sentence.split(' ')] + [EOS_index]
+
+def add_padding(seq, max_length):
+    seq += [0 for i in range(max_length - len(seq))]
+    return seq
+
+def mini_batch(batch_size, pairs, input_lang, output_lang):
+    input_seqs = []
+    target_seqs = []
+
+    # Choose random pairs
+    for i in range(batch_size):
+        pair = random.choice(pairs)
+        input_seqs.append(add_indices_from_sentence(input_lang, pair[0]))
+        target_seqs.append(add_indices_from_sentence(output_lang, pair[1]))
+
+    # Zip into pairs, sort by length (descending), unzip
+    seq_pairs = sorted(zip(input_seqs, target_seqs), key=lambda p: len(p[0]), reverse=True)
+    input_seqs, target_seqs = zip(*seq_pairs)
+
+    # For input and target sequences, get array of lengths and pad with 0s to max length
+    input_lengths = [len(s) for s in input_seqs]
+    input_padded = [add_padding(s, max(input_lengths)) for s in input_seqs]
+    target_lengths = [len(s) for s in target_seqs]
+    target_padded = [add_padding(s, max(target_lengths)) for s in target_seqs]
+
+    # Turn padded arrays into (batch x seq) tensors, transpose into (seq x batch)
+    input_var = Variable(torch.LongTensor(input_padded)).transpose(0, 1)
+    target_var = Variable(torch.LongTensor(target_padded)).transpose(0, 1)
+
+    return input_var, input_lengths, target_var, target_lengths
 
 ######################################################################
 
@@ -241,10 +241,11 @@ class AttnDecoderRNN(nn.Module):
         # layers
         self.embedding = nn.Embedding(output_size, hidden_size)
         self.embedding_dropout = nn.Dropout(dropout_p)
-        self.gru = nn.GRU(hidden_size, hidden_size, dropout=dropout_p)
+        self.rnn = nn.GRU(hidden_size, hidden_size, dropout=dropout_p)
+        self.attn = AttentionLayer(self.attn_model, hidden_size)
         self.concat = nn.Linear(hidden_size * 2, hidden_size)
         self.out = nn.Linear(hidden_size, output_size)
-        self.attn = AttentionLayer(self.attn_model, hidden_size)
+        
 
     def forward(self, input, hidden, encoder_outputs):
         """runs the forward pass of the decoder
@@ -257,18 +258,15 @@ class AttnDecoderRNN(nn.Module):
         
         # Calculate attention weights and apply to encoder outputs
         batch_size = input.size(0)
-        embedded = self.embedding(input)
-        embedded = self.embedding_dropout(embedded)
-        embedded = embedded.view(1, batch_size, self.hidden_size)
+        embedded = self.embedding_dropout(self.embedding(input)).view(1, batch_size, self.hidden_size)
         
-        rnn_output, hidden = self.gru(embedded, hidden)
+        rnn_output, hidden = self.rnn(embedded, hidden)
         
         attn_weights = self.attn(rnn_output, encoder_outputs)
+        #context vector
         context = attn_weights.bmm(encoder_outputs.transpose(0, 1)) 
-
-        rnn_output = rnn_output.squeeze(0) 
-        context = context.squeeze(1)       
-        concat_input = torch.cat((rnn_output, context), 1)
+      
+        concat_input = torch.cat((rnn_output.squeeze(0), context.squeeze(1)), 1)
         concat_output = torch.tanh(self.concat(concat_input))
 
         
@@ -328,7 +326,7 @@ def train(input_batches, input_lengths, target_batches, target_lengths, encoder,
 
 ######################################################################
 
-def translate(encoder, decoder, sentence, src_vocab, tgt_vocab, max_length=MAX_LENGTH):
+def translate(encoder, decoder, sentence, src_vocab, tgt_vocab, target_lengths, batch_size, max_length=MAX_LENGTH):
     """
     runs tranlsation, returns the output and attention
     """
@@ -337,48 +335,49 @@ def translate(encoder, decoder, sentence, src_vocab, tgt_vocab, max_length=MAX_L
     encoder.eval()
     decoder.eval()
 
-    with torch.no_grad():
-        input_tensor = tensor_from_sentence(src_vocab, sentence)
-        input_length = input_tensor.size()[0]
-        encoder_hidden = encoder.get_initial_hidden_state()
+    input_lengths = [len(sentence)]
+    input_seqs = [add_indices_from_sentence(src_vocab, sentence)]
+    input_batches = Variable(torch.LongTensor(input_seqs)).transpose(0, 1)
 
-        encoder_outputs = torch.zeros(max_length, encoder.hidden_size, device=device)
 
-        for ei in range(input_length):
-            encoder_output, encoder_hidden = encoder(input_tensor[ei],
-                                                     encoder_hidden)
-            encoder_outputs[ei] += encoder_output[0, 0]
+    encoder_outputs, encoder_hidden = encoder(input_batches, input_lengths)
+        
+    # prepare decoder
+    decoder_input = torch.tensor([[SOS_index] * batch_size], device=device).transpose(0,1)
+    decoder_hidden = encoder_hidden
+    max_target_length = max(target_lengths)
+    all_decoder_outputs = Variable(torch.zeros(max_target_length, batch_size, decoder.output_size))
+    decoded_words = []
+    decoder_attentions = torch.zeros(max_length + 1, max_length + 1)
+    
+    for t in range(max_target_length):
+        decoder_output, decoder_hidden, decoder_attn = decoder(
+            decoder_input, decoder_hidden, encoder_outputs
+        )
+        decoder_attentions[t,:decoder_attn.size(2)] += decoder_attn.squeeze(0).squeeze(0).cpu().data
+        topv, topi = decoder_output.data.topk(1)
+        ni = topi[0][0]
+        if ni == EOS_token:
+            decoded_words.append('<EOS>')
+            break
+        else:
+            decoded_words.append(tgt_vocab.index2word[ni])
+        decoder_input = Variable(torch.LongTensor([[ni]]))
+        
 
-        decoder_input = torch.tensor([[SOS_index]], device=device)
+    return decoded_words, decoder_attentions
 
-        decoder_hidden = encoder_hidden
-
-        decoded_words = []
-        decoder_attentions = torch.zeros(max_length, max_length)
-
-        for di in range(max_length):
-            decoder_output, decoder_hidden, decoder_attention = decoder(
-                decoder_input, decoder_hidden, encoder_outputs)
-            decoder_attentions[di] = decoder_attention.data
-            topv, topi = decoder_output.data.topk(1)
-            if topi.item() == EOS_index:
-                decoded_words.append(EOS_token)
-                break
-            else:
-                decoded_words.append(tgt_vocab.index2word[topi.item()])
-
-            decoder_input = topi.squeeze().detach()
-
-        return decoded_words, decoder_attentions[:di + 1]
+        
+        
 
 
 ######################################################################
 
 # Translate (dev/test)set takes in a list of sentences and writes out their transaltes
-def translate_sentences(encoder, decoder, pairs, src_vocab, tgt_vocab, max_num_sentences=None, max_length=MAX_LENGTH):
+def translate_sentences(encoder, decoder, pairs, src_vocab, tgt_vocab, target_lengths, batch_size, max_num_sentences=None, max_length=MAX_LENGTH):
     output_sentences = []
     for pair in pairs[:max_num_sentences]:
-        output_words, attentions = translate(encoder, decoder, pair[0], src_vocab, tgt_vocab)
+        output_words, attentions = translate(encoder, decoder, pair[0], src_vocab, tgt_vocab, target_lengths, batch_size)
         output_sentence = ' '.join(output_words)
         output_sentences.append(output_sentence)
     return output_sentences
@@ -389,12 +388,12 @@ def translate_sentences(encoder, decoder, pairs, src_vocab, tgt_vocab, max_num_s
 # input, target, and output to make some subjective quality judgements:
 #
 
-def translate_random_sentence(encoder, decoder, pairs, src_vocab, tgt_vocab, n=1):
+def translate_random_sentence(encoder, decoder, pairs, target_lengths, batch_size, src_vocab, tgt_vocab, n=1):
     for i in range(n):
         pair = random.choice(pairs)
         print('>', pair[0])
         print('=', pair[1])
-        output_words, attentions = translate(encoder, decoder, pair[0], src_vocab, tgt_vocab)
+        output_words, attentions = translate(encoder, decoder, pair[0], src_vocab, tgt_vocab, target_lengths, batch_size)
         output_sentence = ' '.join(output_words)
         print('<', output_sentence)
         print('')
@@ -430,9 +429,9 @@ def show_attention(input_sentence, output_words, attentions):
 
 
 
-def translate_and_show_attention(input_sentence, encoder1, decoder1, src_vocab, tgt_vocab):
+def translate_and_show_attention(input_sentence, encoder1, decoder1, src_vocab, tgt_vocab, target_lengths, batch_size):
     output_words, attentions = translate(
-        encoder1, decoder1, input_sentence, src_vocab, tgt_vocab)
+        encoder1, decoder1, input_sentence, src_vocab, tgt_vocab, target_lengths, batch_size)
     print('input =', input_sentence)
     print('output =', ' '.join(output_words))
     show_attention(input_sentence, output_words, attentions)
@@ -481,6 +480,8 @@ def main():
 
     args = ap.parse_args()
 
+    batch_size = 8
+
     # process the training, dev, test files
 
     # Create vocab from training data, or load if checkpointed
@@ -526,7 +527,7 @@ def main():
     while iter_num < args.n_iters:
         iter_num += 1
         input_batches, input_lengths, target_batches, target_lengths = mini_batch(8, train_pairs, args.src_lang, args.tgt_lang)
-        loss = train(input_batches,input_lengths,)
+        loss = train(input_batches, input_lengths, target_batches, target_lengths, encoder, decoder, optimizer,criterion,batch_size=8)
         print_loss_total += loss
 
         if iter_num % args.checkpoint_every == 0:
@@ -550,8 +551,8 @@ def main():
                          iter_num / args.n_iters * 100,
                          print_loss_avg)
             # translate from the dev set
-            translate_random_sentence(encoder, decoder, dev_pairs, src_vocab, tgt_vocab, n=2)
-            translated_sentences = translate_sentences(encoder, decoder, dev_pairs, src_vocab, tgt_vocab)
+            translate_random_sentence(encoder, decoder, dev_pairs, target_lengths, batch_size, src_vocab, tgt_vocab, n=2)
+            translated_sentences = translate_sentences(encoder, decoder, dev_pairs, target_lengths, batch_size, src_vocab, tgt_vocab)
 
             references = [[clean(pair[1]).split(), ] for pair in dev_pairs[:len(translated_sentences)]]
             candidates = [clean(sent).split() for sent in translated_sentences]
@@ -559,7 +560,7 @@ def main():
             logging.info('Dev BLEU score: %.2f', dev_bleu)
 
     # translate test set and write to file
-    translated_sentences = translate_sentences(encoder, decoder, test_pairs, src_vocab, tgt_vocab)
+    translated_sentences = translate_sentences(encoder, decoder, test_pairs, target_lengths, batch_size, src_vocab, tgt_vocab)
     with open(args.out_file, 'wt', encoding='utf-8') as outf:
         for sent in translated_sentences:
             outf.write(clean(sent) + '\n')
